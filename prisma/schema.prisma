@@ -1,0 +1,234 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Organization {
+  id               String   @id @default(cuid())
+  name             String
+  slug             String   @unique
+  clerkOrgId       String   @unique
+  stripeCustomerId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  bots    Bot[]
+  members Member[]
+}
+
+model Bot {
+  id          String       @id @default(cuid())
+  name        String
+  token       String
+  username    String?
+  description String?
+  webhookSet  Boolean      @default(false)
+  active      Boolean      @default(true)
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  plans     Plan[]
+  messages  Message[]
+  media     Media[]
+  customers Customer[]
+  channels  Channel[]
+}
+
+model Plan {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  price           Int
+  priceBRL        Int?
+  currency        String   @default("USD")
+  interval        String   @default("monthly")
+  trialDays       Int      @default(0)
+  active          Boolean  @default(true)
+  stripeProductId String?
+  stripePriceId   String?
+  botId           String
+  bot             Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  features      PlanFeature[]
+  subscriptions Subscription[]
+}
+
+model PlanFeature {
+  id     String @id @default(cuid())
+  text   String
+  planId String
+  plan   Plan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+}
+
+model Message {
+  id               String   @id @default(cuid())
+  name             String
+  trigger          String?
+  content          String
+  parseMode        String   @default("MarkdownV2")
+  buttons          String?
+  translations     String?
+  mediaId          String?
+  media            Media?   @relation(fields: [mediaId], references: [id])
+  mediaIds         String?
+  secondaryContent String?
+  secondaryEnabled Boolean  @default(false)
+  ctaEnabled       Boolean  @default(false)
+  dynamicMedia     Boolean  @default(false)
+  miniAppEnabled   Boolean  @default(false)
+  botId            String
+  bot              Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model Media {
+  id               String   @id @default(cuid())
+  name             String
+  type             String
+  url              String?
+  mimeType         String?
+  fileSize         Int?
+  fileId           String?
+  fileUniqueId     String?
+  storageMessageId Int?
+  width            Int?
+  height           Int?
+  duration         Int?
+  thumbnailFileId  String?
+  storageChannelId String?
+  storageChannel   Channel? @relation(fields: [storageChannelId], references: [id], onDelete: SetNull)
+  botId            String
+  bot              Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  createdAt        DateTime @default(now())
+
+  messages Message[]
+}
+
+model Customer {
+  id         String   @id @default(cuid())
+  telegramId String
+  username   String?
+  firstName  String?
+  lastName   String?
+  language   String?
+  source     String?
+  botId      String
+  bot        Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  subscriptions Subscription[]
+  payments      Payment[]
+
+  @@unique([telegramId, botId])
+}
+
+model Subscription {
+  id          String    @id @default(cuid())
+  status      String
+  startDate   DateTime
+  endDate     DateTime?
+  trialEnd    DateTime?
+  planId      String
+  plan        Plan      @relation(fields: [planId], references: [id])
+  customerId  String
+  customer    Customer  @relation(fields: [customerId], references: [id])
+  stripeSubId String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model Payment {
+  id         String   @id @default(cuid())
+  amount     Int
+  currency   String   @default("BRL")
+  status     String
+  provider   String
+  externalId String?
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  metadata   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model CheckoutLink {
+  id         String   @id @default(cuid())
+  telegramId String
+  planId     String
+  botId      String
+  sessionId  String
+  url        String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@unique([telegramId, planId, botId])
+}
+
+model Member {
+  id          String       @id @default(cuid())
+  role        String       @default("member")
+  clerkUserId String
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([clerkUserId, orgId])
+}
+
+model Channel {
+  id          String   @id @default(cuid())
+  chatId      String
+  username    String?
+  title       String
+  type        String   @default("channel")
+  language    String?
+  memberCount Int?
+  photoUrl    String?
+  botIsAdmin  Boolean  @default(true)
+  isStorage   Boolean  @default(false)
+  botId       String
+  bot         Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  posts       ChannelPost[]
+  mediaAssets Media[]
+
+  @@unique([chatId, botId])
+}
+
+model BotTemplate {
+  id        String   @id @default(cuid())
+  orgId     String
+  sourceBot String
+  name      String
+  steps     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ChannelPost {
+  id            String    @id @default(cuid())
+  telegramMsgId Int?
+  content       String
+  parseMode     String    @default("MarkdownV2")
+  buttons       String?
+  mediaUrl      String?
+  mediaType     String?
+  status        String    @default("draft")
+  sentAt        DateTime?
+  channelId     String
+  channel       Channel   @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}

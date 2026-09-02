@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Plan" ADD COLUMN     "priceBRL" INTEGER,
+ALTER COLUMN "currency" SET DEFAULT 'USD';
