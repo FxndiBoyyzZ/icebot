@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { prisma } from "@/lib/prisma";
-import { LANG_PRICING, ZERO_DECIMAL, charmPrice } from "@/lib/pricing";
 import { appUrl as getAppUrl } from "@/lib/utils";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: "2026-06-24.dahlia" });
@@ -18,7 +17,7 @@ export async function POST(
 ) {
   try {
     const { botId } = await params;
-    const { planId, telegramId, telegramChatId, language } = await req.json();
+    const { planId, telegramId, telegramChatId } = await req.json();
 
     const [plan, bot] = await Promise.all([
       prisma.plan.findUnique({ where: { id: planId } }),
@@ -65,10 +64,9 @@ export async function POST(
     if (!appUrl) return NextResponse.json({ error: "APP_URL não configurada" }, { status: 500 });
 
     const isRecurring = plan.interval === "monthly" || plan.interval === "yearly";
-    const lang = (language ?? "en").split("-")[0].toLowerCase();
-    const [currency, rate] = LANG_PRICING[lang] ?? ["usd", 1.00, "$"];
-    const isZeroDecimal = ZERO_DECIMAL.has(currency);
-    const convertedAmount = charmPrice(plan.price, rate, isZeroDecimal);
+    // Setup BR: preço direto em BRL, sem conversão. priceBRL tem prioridade.
+    const currency = "brl";
+    const amountBRL = plan.priceBRL ?? plan.price;
 
     const sessionParams: Stripe.Checkout.SessionCreateParams = {
       mode: isRecurring ? "subscription" : "payment",
@@ -79,7 +77,7 @@ export async function POST(
           price_data: {
             currency,
             product_data: { name: plan.name, description: plan.description ?? undefined },
-            unit_amount: convertedAmount,
+            unit_amount: amountBRL,
             ...(isRecurring && {
               recurring: { interval: INTERVAL_MAP[plan.interval] ?? "month" },
             }),

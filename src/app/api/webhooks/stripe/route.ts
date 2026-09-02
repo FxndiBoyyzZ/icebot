@@ -109,8 +109,9 @@ export async function POST(req: NextRequest) {
     await prisma.payment.create({
       data: {
         customerId: customer.id,
-        amount: plan.price * 100,
-        currency: plan.currency,
+        // preço em centavos de BRL (priceBRL tem prioridade)
+        amount: plan.priceBRL ?? plan.price,
+        currency: "brl",
         status: "paid",
         provider: "stripe",
         externalId: session.id,

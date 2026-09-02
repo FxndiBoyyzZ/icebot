@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getLanguage } from "@/data/languages";
-import { displayPrice, LANG_PRICING } from "@/lib/pricing";
-import { getOrTranslate, translateOne, LANG_NAMES } from "@/lib/translate";
+import { LANG_NAMES } from "@/lib/translate";
 import { appUrl } from "@/lib/utils";
 
 // /start pode disparar tradução via Anthropic + envio de mensagens
@@ -42,34 +40,96 @@ async function tgPost(token: string, method: string, body: Record<string, unknow
   return data;
 }
 
-function formatPrice(price: number, currency: string) {
-  return new Intl.NumberFormat("pt-BR", { style: "currency", currency }).format(price);
+function safeJson<T>(s: string | null | undefined, fallback: T): T {
+  if (!s) return fallback;
+  try { return JSON.parse(s) as T; } catch { return fallback; }
 }
 
-function intervalLabel(interval: string) {
-  return interval === "monthly" ? "/mês" : interval === "yearly" ? "/ano" : "";
+function replaceVars(s: string, from: { first_name?: string; username?: string }): string {
+  return s
+    .replace(/\{nome\}/g, from.first_name ?? "")
+    .replace(/\{username\}/g, from.username ? `@${from.username}` : from.first_name ?? "");
 }
 
-// Translates secondaryContent using the same translations JSON field,
-// keyed as "2:<lang>" to avoid colliding with primary translations.
-async function translateSecondary(
-  content: string,
-  targetLang: string,
-  messageId: string,
-  existing: TranslationMap,
-): Promise<string> {
-  if (targetLang === "en" || !content?.trim()) return content;
-  const cacheKey = `2:${targetLang}`;
-  const cached = existing[cacheKey];
-  if (cached?.content) return cached.content;
-  try {
-    const translated = await translateOne(content, targetLang);
-    const updated = { ...existing, [cacheKey]: { content: translated, auto: true, updatedAt: new Date().toISOString() } };
-    await prisma.message.update({ where: { id: messageId }, data: { translations: JSON.stringify(updated) } });
-    return translated;
-  } catch {
-    return content;
+// Preço mostrado direto em BRL, sem conversão. priceBRL tem prioridade; senão usa
+// `price` tratado como centavos de real (setup BR).
+function planPriceBRL(plan: { price: number; priceBRL: number | null }): string {
+  const cents = plan.priceBRL ?? plan.price;
+  return `R$ ${(cents / 100).toFixed(2).replace(".", ",")}`;
+}
+
+type WelcomeMsg = {
+  content: string;
+  parseMode: string;
+  buttons: string | null;
+  mediaIds: string | null;
+  secondaryEnabled: boolean;
+  secondaryContent: string | null;
+};
+type PlanLite = { id: string; name: string; price: number; priceBRL: number | null };
+type TgFrom = { id: number; first_name?: string; username?: string; last_name?: string };
+
+// Monta e envia a mensagem de boas-vindas: mídia (foto/vídeo) + texto como legenda
+// + um botão por plano. Sem tradução. Usado no /start e no "voltar".
+async function sendWelcome(
+  token: string,
+  chatId: number | string,
+  welcomeMsg: WelcomeMsg,
+  from: TgFrom,
+  plans: PlanLite[],
+): Promise<void> {
+  const text = replaceVars(welcomeMsg.content, from);
+  const parseMode = welcomeMsg.parseMode === "plain" ? undefined : welcomeMsg.parseMode;
+
+  const buttons: unknown[][] = [];
+  const redirects = safeJson<RedirectButton[]>(welcomeMsg.buttons, []);
+  const rr = redirects.filter((b) => b.enabled !== false && b.text && b.url).map((b) => ({ text: b.text, url: b.url }));
+  if (rr.length) buttons.push(rr);
+  for (const p of plans) buttons.push([{ text: `${p.name} — ${planPriceBRL(p)}`, callback_data: `icebot:pay:${p.id}` }]);
+  const reply_markup = buttons.length ? { inline_keyboard: buttons } : undefined;
+
+  const fileIds = safeJson<string[]>(welcomeMsg.mediaIds, []).filter(Boolean);
+  const typeByFid: Record<string, string> = {};
+  if (fileIds.length) {
+    const rows = await prisma.media.findMany({ where: { fileId: { in: fileIds } } });
+    for (const r of rows) if (r.fileId) typeByFid[r.fileId] = r.type;
   }
+
+  const methodFor = (t: string) =>
+    t === "video" ? ["sendVideo", "video"] : t === "audio" ? ["sendAudio", "audio"] : t === "document" ? ["sendDocument", "document"] : ["sendPhoto", "photo"];
+
+  // 1 mídia → envia com legenda + botões
+  if (fileIds.length === 1) {
+    const fid = fileIds[0];
+    const [method, field] = methodFor(typeByFid[fid] ?? "photo");
+    const base: Record<string, unknown> = { chat_id: chatId, [field]: fid, caption: text, ...(reply_markup && { reply_markup }) };
+    const r = await tgPost(token, method, { ...base, ...(parseMode && { parse_mode: parseMode }) });
+    if (!r.ok && parseMode) await tgPost(token, method, base);
+    return;
+  }
+
+  // 2+ mídias → media group (sem botões) e depois a mensagem com botões
+  if (fileIds.length > 1) {
+    const group = fileIds.slice(0, 10).map((fid, i) => ({
+      type: (typeByFid[fid] === "video" ? "video" : "photo") as "video" | "photo",
+      media: fid,
+      ...(i === 0 ? { caption: text, ...(parseMode && { parse_mode: parseMode }) } : {}),
+    }));
+    const r = await tgPost(token, "sendMediaGroup", { chat_id: chatId, media: group });
+    if (!r.ok && parseMode) {
+      await tgPost(token, "sendMediaGroup", {
+        chat_id: chatId,
+        media: group.map(({ type, media }, i) => (i === 0 ? { type, media, caption: text } : { type, media })),
+      });
+    }
+    if (reply_markup) await tgPost(token, "sendMessage", { chat_id: chatId, text: "👇 Escolha seu acesso:", reply_markup });
+    return;
+  }
+
+  // sem mídia → só texto
+  const base: Record<string, unknown> = { chat_id: chatId, text, ...(reply_markup && { reply_markup }) };
+  const r = await tgPost(token, "sendMessage", { ...base, ...(parseMode && { parse_mode: parseMode }) });
+  if (!r.ok && parseMode) await tgPost(token, "sendMessage", base);
 }
 
 // ── main handler ─────────────────────────────────────────────────────────────
@@ -138,36 +198,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ bot
         return NextResponse.json({ ok: true });
       }
 
-      // ── Back to welcome (restore original message) ───────────────────────────
+      // ── Back to welcome (apaga o detalhe do plano e reenvia as boas-vindas) ──
       if (data === "icebot:welcome") {
         const welcomeMsg = bot.messages[0];
         const messageId = cbq.message?.message_id;
-        if (!welcomeMsg || !chatId || !messageId) return NextResponse.json({ ok: true });
-
-        const lang = from.language_code?.split("-")[0] ?? "en";
-        const translations: TranslationMap = welcomeMsg.translations ? JSON.parse(welcomeMsg.translations) : {};
-        const vars = (s: string) =>
-          s.replace(/\{nome\}/g, from.first_name ?? "User")
-           .replace(/\{username\}/g, from.username ? `@${from.username}` : from.first_name ?? "");
-        const translatedBack = await getOrTranslate(welcomeMsg.content, lang, welcomeMsg.id, translations);
-        const content = vars(translatedBack);
-        const finalParseMode = welcomeMsg.parseMode === "plain" ? undefined : welcomeMsg.parseMode;
-
-        const planButtons: unknown[][] = (bot.plans ?? []).map((p) => {
-          const isBR = lang === "pt";
-          const priceText = isBR && p.priceBRL != null
-            ? `R$${(p.priceBRL / 100).toFixed(2).replace(".", ",")} BRL`
-            : displayPrice(p.price, lang);
-          return [{ text: `${p.name} — ${priceText}`, callback_data: `icebot:pay:${p.id}` }];
-        });
-
-        await tgPost(bot.token, "editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
-          text: content,
-          ...(finalParseMode && { parse_mode: finalParseMode }),
-          ...(planButtons.length > 0 && { reply_markup: { inline_keyboard: planButtons } }),
-        });
+        if (!welcomeMsg || !chatId) return NextResponse.json({ ok: true });
+        if (messageId) {
+          await tgPost(bot.token, "deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
+        }
+        await sendWelcome(bot.token, chatId, welcomeMsg, from, bot.plans ?? []);
         return NextResponse.json({ ok: true });
       }
 
@@ -175,10 +214,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ bot
       if (data.startsWith("icebot:pay:")) {
         const planId = data.slice("icebot:pay:".length);
         const messageId = cbq.message?.message_id;
-        const lang = from.language_code?.split("-")[0] ?? "en";
         const plan = (bot.plans ?? []).find((p) => p.id === planId);
 
-        if (!plan || !chatId || !messageId) return NextResponse.json({ ok: true });
+        if (!plan || !chatId) return NextResponse.json({ ok: true });
+
+        // A mensagem anterior pode ser mídia (não dá editMessageText) — apaga e reenvia
+        const replaceMsg = async (text: string, keyboard: unknown[][]) => {
+          if (messageId) await tgPost(bot.token, "deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
+          await tgPost(bot.token, "sendMessage", { chat_id: chatId, text, reply_markup: { inline_keyboard: keyboard } });
+        };
 
         const checkoutRes = await fetch(
           `${appUrl()}/api/bots/${botId}/checkout`,
@@ -189,57 +233,36 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ bot
               planId,
               telegramId: String(from.id),
               telegramChatId: String(chatId),
-              language: from.language_code ?? "en",
+              language: from.language_code ?? "pt",
             }),
           }
         ).then((r) => r.json());
 
         if (checkoutRes.alreadySubscribed) {
-          await tgPost(bot.token, "editMessageText", {
-            chat_id: chatId,
-            message_id: messageId,
-            text: "✅ Você já tem acesso ativo neste plano!",
-            reply_markup: { inline_keyboard: [[{ text: "← Voltar", callback_data: "icebot:welcome" }]] },
-          });
+          await replaceMsg("✅ Você já tem acesso ativo neste plano!", [[{ text: "← Voltar", callback_data: "icebot:welcome" }]]);
           return NextResponse.json({ ok: true });
         }
-
         if (!checkoutRes.url) {
-          await tgPost(bot.token, "editMessageText", {
-            chat_id: chatId,
-            message_id: messageId,
-            text: "⚠️ Erro ao gerar link de pagamento. Tente novamente em breve.",
-            reply_markup: { inline_keyboard: [[{ text: "← Voltar", callback_data: "icebot:welcome" }]] },
-          });
+          await replaceMsg("⚠️ Erro ao gerar link de pagamento. Tente novamente em breve.", [[{ text: "← Voltar", callback_data: "icebot:welcome" }]]);
           return NextResponse.json({ ok: true });
         }
 
-        // Build plan summary (plain text — safe for any content)
-        const price = displayPrice(plan.price, lang);
         const features = (plan.features as { text: string }[]) ?? [];
         const lines: string[] = [
           `🎯 ${plan.name}`,
           plan.description ? `\n${plan.description}` : "",
           "",
-          `💰 ${price}`,
+          `💰 ${planPriceBRL(plan)}`,
           plan.trialDays > 0 ? `🆓 ${plan.trialDays} dias grátis` : "",
           features.length > 0 ? "\n" + features.map((f) => `✔ ${f.text}`).join("\n") : "",
           "",
-          "Pagamento 100% seguro via Stripe 🔒",
+          "Pagamento seguro 🔒",
         ].filter((l) => l !== "");
 
-        await tgPost(bot.token, "editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
-          text: lines.join("\n"),
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "Finalizar pagamento →", url: checkoutRes.url }],
-              [{ text: "← Voltar aos planos", callback_data: "icebot:welcome" }],
-            ],
-          },
-        });
-
+        await replaceMsg(lines.join("\n"), [
+          [{ text: "Finalizar pagamento →", url: checkoutRes.url }],
+          [{ text: "← Voltar aos planos", callback_data: "icebot:welcome" }],
+        ]);
         return NextResponse.json({ ok: true });
       }
 
@@ -321,71 +344,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ bot
       if (!welcomeMsg) return NextResponse.json({ ok: true });
 
       const rawParam = message.text.split(" ")[1];
-      const { langCode: paramLang, source } = parseStartParam(rawParam);
-      const langCode = paramLang ?? (from.language_code ? from.language_code.split("-")[0] : null);
+      const { langCode, source } = parseStartParam(rawParam);
 
-      console.log(`[webhook] /start from=${from.id} username=${from.username} tg_language_code=${from.language_code ?? "null"} resolved_lang=${langCode ?? "null"} param=${rawParam ?? "none"}`);
-      const effectiveLang = langCode ?? "en";
-      const translations: TranslationMap = welcomeMsg.translations
-        ? JSON.parse(welcomeMsg.translations)
-        : {};
+      console.log(`[webhook] /start from=${from.id} username=${from.username} param=${rawParam ?? "none"}`);
 
-      const vars = (s: string) =>
-        s
-          .replace(/\{nome\}/g, from.first_name ?? "User")
-          .replace(/\{username\}/g, from.username ? `@${from.username}` : from.first_name ?? "");
-
-      const translatedContent = await getOrTranslate(
-        welcomeMsg.content,
-        effectiveLang,
-        welcomeMsg.id,
-        translations,
-      );
-      const finalContent = vars(translatedContent);
-      const finalParseMode = welcomeMsg.parseMode === "plain" ? undefined : welcomeMsg.parseMode;
-
-      const redirectButtons: RedirectButton[] = welcomeMsg.buttons
-        ? JSON.parse(welcomeMsg.buttons)
-        : [];
-      const urlButtonRow = redirectButtons
-        .filter((b) => b.enabled !== false && b.text && b.url)
-        .map((b) => ({ text: b.text, url: b.url }));
-
-      const manualTranslation = translations[effectiveLang] ?? null;
-      const allButtons: unknown[][] = [...(manualTranslation?.buttons ?? [])];
-      if (urlButtonRow.length > 0) allButtons.push(urlButtonRow);
-
-      // Add one button per plan directly in the welcome message
-      if (bot.plans && bot.plans.length > 0) {
-        for (const p of bot.plans) {
-          const isBR = effectiveLang === "pt";
-          const priceText = isBR && p.priceBRL != null
-            ? `R$${(p.priceBRL / 100).toFixed(2).replace(".", ",")} BRL`
-            : displayPrice(p.price, effectiveLang);
-          allButtons.push([{
-            text: `${p.name} — ${priceText}`,
-            callback_data: `icebot:pay:${p.id}`,
-          }]);
-        }
-      }
-      if (!langCode) {
-        const flagButtons = Object.entries(translations)
-          .filter(([, t]) => t.content)
-          .map(([code]) => {
-            const lang = getLanguage(code);
-            return { text: lang?.flag ?? code.toUpperCase(), callback_data: `lang:${code}` };
-          });
-        if (flagButtons.length > 0) allButtons.push(flagButtons);
-      }
-
-      // Send welcome message + upsert customer in parallel
-      const [sendResult] = await Promise.all([
-        tgPost(bot.token, "sendMessage", {
-          chat_id: chatId,
-          text: finalContent,
-          ...(finalParseMode && { parse_mode: finalParseMode }),
-          ...(allButtons.length > 0 && { reply_markup: { inline_keyboard: allButtons } }),
-        }),
+      await Promise.all([
+        sendWelcome(bot.token, chatId, welcomeMsg, from, bot.plans ?? []),
         prisma.customer.upsert({
           where: { telegramId_botId: { telegramId: String(from.id), botId } },
           update: {
@@ -406,41 +370,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ bot
           },
         }).catch((err) => {
           console.error(`[webhook] customer upsert error for ${from.id}:`, err);
-          return prisma.customer.upsert({
-            where: { telegramId_botId: { telegramId: String(from.id), botId } },
-            update: {
-              username: from.username,
-              firstName: from.first_name,
-              lastName: from.last_name,
-              ...(langCode && { language: langCode }),
-              ...(source && { source }),
-            },
-            create: { telegramId: String(from.id), username: from.username, firstName: from.first_name, lastName: from.last_name, language: langCode, source, botId },
-          });
         }),
       ]);
 
-      // Fallback: if parse_mode caused error, resend as plain text
-      if (!sendResult.ok && finalParseMode) {
-        await tgPost(bot.token, "sendMessage", {
-          chat_id: chatId,
-          text: finalContent,
-          ...(allButtons.length > 0 && { reply_markup: { inline_keyboard: allButtons } }),
-        });
-      }
-
+      const parseMode = welcomeMsg.parseMode === "plain" ? undefined : welcomeMsg.parseMode;
       if (welcomeMsg.secondaryEnabled && welcomeMsg.secondaryContent?.trim()) {
-        const secondaryTranslated = await translateSecondary(
-          welcomeMsg.secondaryContent,
-          effectiveLang,
-          welcomeMsg.id,
-          welcomeMsg.translations ? JSON.parse(welcomeMsg.translations) as TranslationMap : {},
-        );
-        await tgPost(bot.token, "sendMessage", {
-          chat_id: chatId,
-          text: vars(secondaryTranslated),
-          ...(finalParseMode && { parse_mode: finalParseMode }),
-        });
+        const base: Record<string, unknown> = { chat_id: chatId, text: replaceVars(welcomeMsg.secondaryContent, from) };
+        const r = await tgPost(bot.token, "sendMessage", { ...base, ...(parseMode && { parse_mode: parseMode }) });
+        if (!r.ok && parseMode) await tgPost(bot.token, "sendMessage", base);
       }
 
     } else {
