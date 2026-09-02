@@ -5,6 +5,11 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** NEXT_PUBLIC_APP_URL sem barra(s) no final — evita `//api/...` (redirect 308). */
+export function appUrl(): string {
+  return (process.env.NEXT_PUBLIC_APP_URL ?? "").replace(/\/+$/, "");
+}
+
 export function formatCurrency(cents: number, currency = "BRL") {
   return new Intl.NumberFormat("pt-BR", {
     style: "currency",

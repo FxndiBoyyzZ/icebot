@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { prisma } from "@/lib/prisma";
 import { LANG_PRICING, ZERO_DECIMAL, charmPrice } from "@/lib/pricing";
+import { appUrl as getAppUrl } from "@/lib/utils";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: "2026-06-24.dahlia" });
 
@@ -60,7 +61,7 @@ export async function POST(
     }
 
     // 3. Create a new Stripe Checkout session
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+    const appUrl = getAppUrl();
     if (!appUrl) return NextResponse.json({ error: "APP_URL não configurada" }, { status: 500 });
 
     const isRecurring = plan.interval === "monthly" || plan.interval === "yearly";

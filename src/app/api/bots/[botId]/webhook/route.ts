@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { appUrl } from "@/lib/utils";
 
 export const runtime = "nodejs";
 
@@ -13,9 +14,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ bot
     const info = await fetch(`https://api.telegram.org/bot${bot.token}/getWebhookInfo`).then((r) => r.json());
     if (!info.ok) return NextResponse.json({ error: info.description ?? "Erro" }, { status: 400 });
 
-    const expectedUrl = process.env.NEXT_PUBLIC_APP_URL
-      ? `${process.env.NEXT_PUBLIC_APP_URL}/api/webhooks/telegram/${botId}`
-      : null;
+    const expectedUrl = appUrl() ? `${appUrl()}/api/webhooks/telegram/${botId}` : null;
 
     return NextResponse.json({
       url: info.result.url || "",
@@ -37,10 +36,10 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ bo
     const bot = await prisma.bot.findUnique({ where: { id: botId } });
     if (!bot) return NextResponse.json({ error: "Bot não encontrado" }, { status: 404 });
 
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL;
-    if (!appUrl) return NextResponse.json({ error: "NEXT_PUBLIC_APP_URL não configurada" }, { status: 500 });
+    const base = appUrl();
+    if (!base) return NextResponse.json({ error: "NEXT_PUBLIC_APP_URL não configurada" }, { status: 500 });
 
-    const webhookUrl = `${appUrl}/api/webhooks/telegram/${botId}`;
+    const webhookUrl = `${base}/api/webhooks/telegram/${botId}`;
 
     const data = await fetch(`https://api.telegram.org/bot${bot.token}/setWebhook`, {
       method: "POST",

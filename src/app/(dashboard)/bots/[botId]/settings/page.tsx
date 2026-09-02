@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Webhook, Key, AlertTriangle, CheckCircle2, Eye, EyeOff, Loader2, XCircle, RefreshCw } from "lucide-react";
+import { appUrl } from "@/lib/utils";
 
 interface WebhookInfo {
   url: string;
@@ -127,7 +128,7 @@ export default function BotSettingsPage({ params }: { params: Promise<{ botId: s
           <div className="flex flex-col gap-1.5">
             <Label>URL do webhook</Label>
             <Input
-              value={`${process.env.NEXT_PUBLIC_APP_URL ?? "https://seu-dominio.com"}/api/webhooks/telegram/${botId}`}
+              value={`${appUrl() || "https://seu-dominio.com"}/api/webhooks/telegram/${botId}`}
               readOnly
               className="font-mono text-xs text-zinc-500"
             />

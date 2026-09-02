@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { getLanguage } from "@/data/languages";
 import { displayPrice, LANG_PRICING } from "@/lib/pricing";
 import { getOrTranslate, translateOne, LANG_NAMES } from "@/lib/translate";
+import { appUrl } from "@/lib/utils";
 
 // /start pode disparar tradução via Anthropic + envio de mensagens
 export const runtime = "nodejs";
@@ -180,7 +181,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ bot
         if (!plan || !chatId || !messageId) return NextResponse.json({ ok: true });
 
         const checkoutRes = await fetch(
-          `${process.env.NEXT_PUBLIC_APP_URL}/api/bots/${botId}/checkout`,
+          `${appUrl()}/api/bots/${botId}/checkout`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
